@@ -1,0 +1,1 @@
+Autonomous AI voice agent platform with sub-second latency, local-first LLMs, dynamic RAG, and multimodal Generative UI.
