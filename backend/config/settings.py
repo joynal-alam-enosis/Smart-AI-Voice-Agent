@@ -125,6 +125,9 @@ class AppSettings(BaseSettings):
     embedding_provider: Literal["local_hash", "nomic_ollama", "fastembed"] = "local_hash"
     embedding_model: str = "nomic-embed-text"
 
+    # Weather (stub stays offline; open_meteo is free and optional)
+    weather_provider: Literal["stub", "open_meteo"] = "stub"
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_provider(cls, val: Any) -> str:
