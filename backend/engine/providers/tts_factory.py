@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from backend.config.settings import AppSettings, VoiceSettings, get_settings
+from backend.engine.audio.voice_catalog import get_voice_profile
 from backend.engine.providers.base import (
     MissingDependencyError,
     ProviderConfigurationError,
@@ -25,9 +26,17 @@ def create_tts_service(
     provider: TTSProviderType = (override.provider if override else app_cfg.tts_provider)
 
     if provider == "kokoro":
-        voice_id = override.voice_id if override else app_cfg.kokoro_voice_id
+        raw_voice_id = override.voice_id if override else app_cfg.kokoro_voice_id
+        profile = get_voice_profile(raw_voice_id, provider="kokoro")
+        voice_id = profile.voice_id
         speed = override.speed if override else app_cfg.kokoro_speed
-        logger.info("Initializing Kokoro TTS: voice_id=%s, speed=%.2f", voice_id, speed)
+
+        logger.info(
+            "Initializing Kokoro TTS: voice_id=%s (%s), speed=%.2f",
+            voice_id,
+            profile.name,
+            speed,
+        )
         try:
             from pipecat.services.kokoro.tts import KokoroTTSService
             return KokoroTTSService(voice_id=voice_id, speed=speed)
@@ -55,8 +64,11 @@ def create_tts_service(
                 "pipecat-ai[cartesia] is required for Cartesia TTS."
             ) from exc
 
-        voice_id = override.voice_id if override else app_cfg.cartesia_voice_id
-        logger.info("Initializing Cartesia TTS: voice_id=%s", voice_id)
+        raw_voice_id = override.voice_id if override else app_cfg.cartesia_voice_id
+        profile = get_voice_profile(raw_voice_id, provider="cartesia")
+        voice_id = profile.voice_id
+
+        logger.info("Initializing Cartesia TTS: voice_id=%s (%s)", voice_id, profile.name)
         return CartesiaTTSService(api_key=api_key, voice_id=voice_id)
 
     elif provider == "elevenlabs":
@@ -66,7 +78,9 @@ def create_tts_service(
 
         try:
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-            voice_id = override.voice_id if override else "21m00Tcm4TlvDq8ikWAM"
+            raw_voice_id = override.voice_id if override else "21m00Tcm4TlvDq8ikWAM"
+            profile = get_voice_profile(raw_voice_id, provider="elevenlabs")
+            voice_id = profile.voice_id
             return ElevenLabsTTSService(api_key=api_key, voice_id=voice_id)
         except ImportError as exc:
             raise MissingDependencyError(
@@ -76,7 +90,9 @@ def create_tts_service(
     elif provider == "piper":
         try:
             from pipecat.services.piper.tts import PiperTTSService
-            voice_id = override.voice_id if override else "en_US-lessac-medium"
+            raw_voice_id = override.voice_id if override else "en_US-lessac-medium"
+            profile = get_voice_profile(raw_voice_id, provider="piper")
+            voice_id = profile.voice_id
             return PiperTTSService(voice_id=voice_id)
         except ImportError as exc:
             raise MissingDependencyError(
