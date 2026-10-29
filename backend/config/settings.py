@@ -121,6 +121,10 @@ class AppSettings(BaseSettings):
     chroma_persist_dir: str = "./data/chroma_db"
     log_level: str = "INFO"
 
+    # RAG Embeddings (local-first; nomic/fastembed are opt-in)
+    embedding_provider: Literal["local_hash", "nomic_ollama", "fastembed"] = "local_hash"
+    embedding_model: str = "nomic-embed-text"
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_provider(cls, val: Any) -> str:
