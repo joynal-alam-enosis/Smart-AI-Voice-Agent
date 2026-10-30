@@ -10,10 +10,12 @@ from __future__ import annotations
 import logging
 import math
 import re
+from json import JSONDecodeError, dumps, loads
 from abc import ABC, abstractmethod
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from backend.rag.chunker import DocumentChunk
 from backend.rag.embeddings import DefaultLocalEmbeddingFunction, get_embedding_function
@@ -59,6 +61,10 @@ class BaseVectorStore(ABC):
         """Atomically promotes the staged collection to live."""
         return None
 
+    def discard_staged_reindex(self) -> None:
+        """Discards an incomplete staged collection after an ingestion failure."""
+        return None
+
 
 class MemoryVectorStore(BaseVectorStore):
     """Lightweight, zero-dependency in-memory vector store with TF-IDF similarity.
@@ -70,6 +76,7 @@ class MemoryVectorStore(BaseVectorStore):
         self._chunks: dict[str, DocumentChunk] = {}
         self._tokenized_docs: dict[str, list[str]] = {}
         self._doc_frequencies: Counter[str] = Counter()
+        self._staged_store: MemoryVectorStore | None = None
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -104,6 +111,8 @@ class MemoryVectorStore(BaseVectorStore):
         return vec
 
     def add_chunks(self, chunks: list[DocumentChunk]) -> int:
+        if self._staged_store is not None:
+            return self._staged_store.add_chunks(chunks)
         added = 0
         for chunk in chunks:
             if not chunk.text.strip():
@@ -183,6 +192,8 @@ class MemoryVectorStore(BaseVectorStore):
         self._chunks.pop(chunk_id, None)
 
     def delete_by_doc(self, doc_name: str) -> int:
+        if self._staged_store is not None:
+            return self._staged_store.delete_by_doc(doc_name)
         to_delete = [
             cid for cid, chunk in self._chunks.items()
             if chunk.metadata.get("doc_name") == doc_name
@@ -192,17 +203,31 @@ class MemoryVectorStore(BaseVectorStore):
         return len(to_delete)
 
     def clear(self) -> None:
+        if self._staged_store is not None:
+            self._staged_store.clear()
+            return
         self._chunks.clear()
         self._tokenized_docs.clear()
         self._doc_frequencies.clear()
 
     def begin_staged_reindex(self) -> None:
-        """Memory store rebuilds in-place; live callers already share the same dict."""
-        return None
+        """Clone live data so staged writes never affect concurrent readers."""
+        staged = MemoryVectorStore()
+        staged.add_chunks(list(self._chunks.values()))
+        self._staged_store = staged
 
     def commit_staged_reindex(self) -> None:
-        """No-op commit for the in-memory backend."""
-        return None
+        """Promote the staged copy after a successful ingestion."""
+        if self._staged_store is None:
+            return
+        self._chunks = self._staged_store._chunks
+        self._tokenized_docs = self._staged_store._tokenized_docs
+        self._doc_frequencies = self._staged_store._doc_frequencies
+        self._staged_store = None
+
+    def discard_staged_reindex(self) -> None:
+        """Drops the staged clone while leaving the live store unchanged."""
+        self._staged_store = None
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -218,10 +243,12 @@ class ChromaVectorStore(BaseVectorStore):
         self.tenant_id = tenant_id
         self.persist_dir = persist_dir or "./data/chroma_db"
         self.collection_name = collection_name or collection_name_for_tenant(tenant_id)
+        self._pointer_path = Path(self.persist_dir) / f"{self.collection_name}.active.json"
         self._embedding_function = embedding_function or DefaultLocalEmbeddingFunction()
         self._client: Any = None
         self._collection: Any = None
         self._staged_collection: Any = None
+        self._staged_collection_name: str | None = None
         self._init_chroma()
 
     def _init_chroma(self) -> None:
@@ -229,7 +256,8 @@ class ChromaVectorStore(BaseVectorStore):
             import chromadb
             Path(self.persist_dir).mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(path=self.persist_dir)
-            self._collection = self._get_or_create_collection(self.collection_name)
+            active_name = self._read_active_collection_name() or self.collection_name
+            self._collection = self._get_or_create_collection(active_name)
             logger.info(
                 "ChromaDB initialized at %s (collection: %s)",
                 self.persist_dir,
@@ -246,6 +274,27 @@ class ChromaVectorStore(BaseVectorStore):
             embedding_function=self._embedding_function,
             metadata={"hnsw:space": "cosine"},
         )
+
+    def _read_active_collection_name(self) -> str | None:
+        """Read the tenant's persisted active collection pointer, if present."""
+        if not self._pointer_path.exists():
+            return None
+        try:
+            payload = loads(self._pointer_path.read_text(encoding="utf-8"))
+            name = payload.get("active_collection")
+            return name if isinstance(name, str) and name else None
+        except (OSError, JSONDecodeError, AttributeError) as exc:
+            logger.warning("Ignoring invalid active collection pointer %s: %s", self._pointer_path, exc)
+            return None
+
+    def _write_active_collection_name(self, collection_name: str) -> None:
+        """Atomically point future readers at a complete collection."""
+        temporary_path = self._pointer_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            dumps({"active_collection": collection_name}),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._pointer_path)
 
     @property
     def is_available(self) -> bool:
@@ -340,11 +389,12 @@ class ChromaVectorStore(BaseVectorStore):
         if not self.is_available:
             return 0
         try:
-            existing = self._collection.get(where={"doc_name": doc_name})
+            target = self._active_write_collection()
+            existing = target.get(where={"doc_name": doc_name})
             ids = existing.get("ids") or []
             if not ids:
                 return 0
-            self._collection.delete(ids=ids)
+            target.delete(ids=ids)
             return len(ids)
         except Exception as exc:
             logger.error("ChromaDB delete_by_doc failed: %s", exc)
@@ -352,46 +402,53 @@ class ChromaVectorStore(BaseVectorStore):
 
     def clear(self) -> None:
         if self.is_available:
-            self._client.delete_collection(name=self.collection_name)
-            self._collection = self._get_or_create_collection(self.collection_name)
+            replacement_name = f"{self.collection_name}__clear__{uuid4().hex[:12]}"
+            replacement = self._get_or_create_collection(replacement_name)
+            self._write_active_collection_name(replacement_name)
+            self._collection = replacement
 
     def begin_staged_reindex(self) -> None:
         """Writes new embeddings into ``{collection}_staged`` without locking live reads."""
         if not self.is_available:
             return
-        staged_name = f"{self.collection_name}_staged"
-        try:
-            self._client.delete_collection(name=staged_name)
-        except Exception:
-            pass
+        staged_name = f"{self.collection_name}__staged__{uuid4().hex[:12]}"
         self._staged_collection = self._get_or_create_collection(staged_name)
+        self._staged_collection_name = staged_name
+        live_data = self._collection.get(include=["documents", "metadatas"])
+        live_ids = live_data.get("ids") or []
+        live_documents = live_data.get("documents") or []
+        live_metadatas = live_data.get("metadatas") or []
+        if live_ids:
+            self._staged_collection.upsert(
+                ids=live_ids,
+                documents=live_documents,
+                metadatas=live_metadatas,
+            )
 
     def commit_staged_reindex(self) -> None:
         """Promotes the staged collection into the live tenant collection."""
         if not self.is_available or self._staged_collection is None:
             return
 
-        staged_name = f"{self.collection_name}_staged"
-        data = self._staged_collection.get(include=["documents", "metadatas"])
-        ids = data.get("ids") or []
-        documents = data.get("documents") or []
-        metadatas = data.get("metadatas") or []
-
-        try:
-            self._client.delete_collection(name=self.collection_name)
-        except Exception:
-            pass
-        live = self._get_or_create_collection(self.collection_name)
-        if ids:
-            live.upsert(ids=ids, documents=documents, metadatas=metadatas)
-
-        try:
-            self._client.delete_collection(name=staged_name)
-        except Exception:
-            pass
-
-        self._collection = live
+        if self._staged_collection_name is None:
+            return
+        self._write_active_collection_name(self._staged_collection_name)
+        self._collection = self._staged_collection
         self._staged_collection = None
+        self._staged_collection_name = None
+
+    def discard_staged_reindex(self) -> None:
+        """Drops a failed staged collection and retains the previous live collection."""
+        if self._staged_collection is None:
+            return
+        staged_name = self._staged_collection_name
+        try:
+            if staged_name:
+                self._client.delete_collection(name=staged_name)
+        except Exception:
+            pass
+        self._staged_collection = None
+        self._staged_collection_name = None
 
 
 def get_vector_store(

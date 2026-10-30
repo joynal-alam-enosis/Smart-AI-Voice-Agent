@@ -83,6 +83,7 @@ class DocumentIngestionPipeline:
         self,
         file_path: str | Path,
         metadata: dict[str, Any] | None = None,
+        document_id: str | None = None,
     ) -> int:
         """Reads a file from disk, chunks it, and indexes into the vector store."""
         path = Path(file_path)
@@ -90,7 +91,7 @@ class DocumentIngestionPipeline:
             raise FileNotFoundError(f"Document file not found: {file_path}")
 
         meta = metadata.copy() if metadata else {}
-        doc_name = path.stem
+        doc_name = document_id or path.stem
         meta.setdefault("doc_name", doc_name)
         meta.setdefault("file_extension", path.suffix)
 
@@ -124,26 +125,34 @@ class DocumentIngestionPipeline:
         self,
         file_path: str | Path,
         metadata: dict[str, Any] | None = None,
+        document_id: str | None = None,
     ) -> int:
         """Deletes previous chunks for a document and re-indexes with fresh content."""
         path = Path(file_path)
-        doc_name = path.stem
+        doc_name = document_id or path.stem
         self.vector_store.delete_by_doc(doc_name)
-        return self.ingest_file(path, metadata=metadata)
+        return self.ingest_file(path, metadata=metadata, document_id=doc_name)
 
     def reindex_atomically(
         self,
         file_path: str | Path,
         metadata: dict[str, Any] | None = None,
+        document_id: str | None = None,
     ) -> int:
         """Re-indexes into a staged collection, then swaps it to live.
 
         Voice calls continue reading the previous collection until commit.
         """
         self.vector_store.begin_staged_reindex()
-        added = self.ingest_file(file_path, metadata=metadata)
-        self.vector_store.commit_staged_reindex()
-        return added
+        try:
+            doc_name = document_id or Path(file_path).stem
+            self.vector_store.delete_by_doc(doc_name)
+            added = self.ingest_file(file_path, metadata=metadata, document_id=doc_name)
+            self.vector_store.commit_staged_reindex()
+            return added
+        except Exception:
+            self.vector_store.discard_staged_reindex()
+            raise
 
     def seed_default_hotel_knowledge(
         self,

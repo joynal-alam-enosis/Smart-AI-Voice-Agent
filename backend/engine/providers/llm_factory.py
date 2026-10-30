@@ -22,7 +22,22 @@ def create_llm_service(
 ) -> Any:
     """Creates and returns the configured LLM service instance."""
     app_cfg = settings or get_settings()
-    provider: LLMProviderType = (override.provider if override else app_cfg.llm_provider)
+    runtime_override: LLMSettings | None = None
+    if settings is None and override is None:
+        try:
+            from backend.api.runtime import get_provider_runtime_store
+
+            active = get_provider_runtime_store().get_active()
+            runtime_override = LLMSettings(
+                provider=active.provider,
+                model=active.model,
+                base_url=active.base_url,
+            )
+        except Exception as exc:
+            logger.debug("Admin runtime provider selection unavailable: %s", exc)
+
+    selected = override or runtime_override
+    provider: LLMProviderType = selected.provider if selected else app_cfg.llm_provider
 
     if provider == "ollama":
         try:
@@ -32,8 +47,8 @@ def create_llm_service(
                 "pipecat-ai[openai] is required for Ollama LLM service."
             ) from exc
 
-        model = (override.model if override else app_cfg.ollama_model)
-        base_url = (override.base_url if override and override.base_url else app_cfg.ollama_base_url)
+        model = selected.model if selected else app_cfg.ollama_model
+        base_url = selected.base_url if selected and selected.base_url else app_cfg.ollama_base_url
 
         logger.info("Initializing Local Ollama LLM: model=%s, base_url=%s", model, base_url)
         return OpenAILLMService(
@@ -54,7 +69,7 @@ def create_llm_service(
                 "pipecat-ai[openai] is required for Groq LLM service."
             ) from exc
 
-        model = (override.model if override else app_cfg.groq_model)
+        model = selected.model if selected else app_cfg.groq_model
         logger.info("Initializing Groq LLM: model=%s", model)
         return OpenAILLMService(
             api_key=api_key,
@@ -74,7 +89,7 @@ def create_llm_service(
                 "pipecat-ai[openai] is required for OpenAI LLM service."
             ) from exc
 
-        model = (override.model if override else app_cfg.openai_model)
+        model = selected.model if selected else app_cfg.openai_model
         logger.info("Initializing OpenAI LLM: model=%s", model)
         return OpenAILLMService(
             api_key=api_key,
@@ -93,7 +108,7 @@ def create_llm_service(
                 "pipecat-ai[google] or google-genai is required for Gemini LLM service."
             ) from exc
 
-        model = (override.model if override else "gemini-2.0-flash")
+        model = selected.model if selected else "gemini-2.0-flash"
         logger.info("Initializing Gemini LLM: model=%s", model)
         return GeminiLLMService(
             api_key=api_key,
