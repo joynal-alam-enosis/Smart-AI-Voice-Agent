@@ -118,6 +118,7 @@ class AppSettings(BaseSettings):
     debug: bool = True
     environment: Literal["development", "production", "testing"] = "development"
     admin_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    consumer_cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # Storage Paths
     database_url: str = "sqlite:///./data/voice_agent.db"
