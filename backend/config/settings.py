@@ -99,6 +99,8 @@ class AppSettings(BaseSettings):
     faster_whisper_model: str = "base.en"
     kokoro_voice_id: str = "af_sarah"
     kokoro_speed: float = 1.00
+    kokoro_model_path: str = "./models/kokoro-v0_19.onnx"
+    kokoro_voices_path: str = "./models/voices.bin"
 
     # Cloud AI Keys
     gemini_api_key: str | None = None
@@ -115,6 +117,7 @@ class AppSettings(BaseSettings):
     port: int = 8000
     debug: bool = True
     environment: Literal["development", "production", "testing"] = "development"
+    admin_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Storage Paths
     database_url: str = "sqlite:///./data/voice_agent.db"

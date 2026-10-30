@@ -52,3 +52,10 @@ class AgentSession:
                 "at": _utc_now(),
             }
         )
+        try:
+            from backend.api.runtime import get_admin_telemetry
+
+            get_admin_telemetry().record_tool_call()
+        except Exception:
+            # Admin telemetry must never affect confirmation or tool execution.
+            pass
